@@ -11,34 +11,13 @@ dir_path = os.path.dirname(os.path.realpath(os.getcwd()))
 
 
 class MultiClassClassifier(nn.Module):
-    def __init__(
-        self,
-        bert_model_path: str,
-        labels_count: int,
-        hidden_dim: int = 1024,
-        mlp_dim: int = 768,
-        extras_dim: int = 100,
-        dropout: float = 0.1,
-        freeze_bert: bool = False,
-    ):
-        """Initializes the fine tuned NLI model.
-
-        Args:
-            bert_model_path (_type_): _description_
-            labels_count (_type_): _description_
-            hidden_dim (int, optional): _description_. Defaults to 1024.
-            mlp_dim (int, optional): _description_. Defaults to 768.
-            extras_dim (int, optional): _description_. Defaults to 100.
-            dropout (float, optional): _description_. Defaults to 0.1.
-            freeze_bert (bool, optional): _description_. Defaults to False.
-        """
+    def __init__(self, bert_model_path, labels_count, hidden_dim=768, mlp_dim=500, extras_dim=100, dropout=0.1,state_dict_final=None, freeze_bert=False):
         super().__init__()
-        self.base_model = bert_model_path
-        self.roberta = AutoModel.from_pretrained(
-            bert_model_path, output_hidden_states=True, output_attentions=True
-        )
-        if "t5" in self.base_model:
-            self.roberta = self.roberta.encoder
+
+        self.roberta = AutoModel.from_pretrained(bert_model_path,output_hidden_states=True,output_attentions=True)
+        if(state_dict_final):
+            self.roberta.load_state_dict(state_dict_final,strict=False)
+
         self.dropout = nn.Dropout(dropout)
         self.mlp = nn.Sequential(
             nn.Linear(hidden_dim, mlp_dim),
@@ -47,7 +26,7 @@ class MultiClassClassifier(nn.Module):
             # # nn.ReLU(),
             # # nn.Linear(mlp_dim, mlp_dim),
             # nn.ReLU(),
-            nn.Linear(mlp_dim, labels_count),
+            nn.Linear(mlp_dim, labels_count)
         )
         # self.softmax = nn.LogSoftmax(dim=1)
         if freeze_bert:
@@ -55,47 +34,42 @@ class MultiClassClassifier(nn.Module):
             for param in self.roberta.parameters():
                 param.requires_grad = False
 
-    def forward(self, tokens: Tensor, masks: Tensor) -> Tensor:
-        """forward pass of NLI model.
-
-        Args:
-            tokens (Tensor): input token ids
-            masks (Tensor): attention masks
-
-        Returns:
-            logits: Tensor
-        """
+    def forward(self, tokens, masks):
         output = self.roberta(tokens, attention_mask=masks)
-        if "bart" in self.base_model or "t5" in self.base_model:
-            output = torch.mean(output[0], dim=1)
-            dropout_output = self.dropout(output)
-        elif "Digit" in self.base_model:
-            dropout_output = self.dropout(output[1])
-
-
-        else:
-            dropout_output = self.dropout(output["pooler_output"])
+        dropout_output = self.dropout(output["pooler_output"])
+        # concat_output = torch.cat((dropout_output, topic_emb), dim=1)
+        # concat_output = self.dropout(concat_output)
         mlp_output = self.mlp(dropout_output)
+        # proba = self.sigmoid(mlp_output)
+        # proba = self.softmax(mlp_output)
 
         return mlp_output
+
+import torch
 
 
 
 class VeracityClassifier:
     """performs stance detection."""
 
-    def __init__(self, base_model, model_name: str = None) -> None:
+    def __init__(self, base_model, model_name: str = None,device=None) -> None:
         """initialized the model.
 
         Args:
         base_model: the backbone model to load from
             model_name (str): name or path to model
         """
-        self.tokenizer = AutoTokenizer.from_pretrained("roberta-large")
+        self.device = device
+        self.tokenizer = AutoTokenizer.from_pretrained("FacebookAI/roberta-large-mnli")
 
-        self.model = MultiClassClassifier(base_model, 3, 1024,768,140,dropout=0.1,freeze_bert=False)
+        self.model = MultiClassClassifier("FacebookAI/roberta-large-mnli",3, 1024,768,140,dropout=0.2,freeze_bert=False)
+        
         print(self.model)
-        self.model.load_state_dict(torch.load(model_name, map_location="cpu"))
+        loaded_dict = torch.load(model_name, map_location="cpu")
+        # loaded_dict = {k.lstrip('module.'):v for k,v in loaded_dict.items()}
+        # loaded_dict = {('ml'+k if k[:2] =='p.' else k):v for k,v in loaded_dict.items()}
+        self.model.load_state_dict(loaded_dict)
+        self.model.to(device)
 
     def predict(self, input: str, max_legnth: int = 256) -> str:
         """predicts the veracity label given claim and evidence.
@@ -118,7 +92,8 @@ class VeracityClassifier:
             max_length=max_legnth,
         )
         with torch.no_grad():
-            logits = self.model(x["input_ids"], x["attention_mask"])
+            logits = self.model(x["input_ids"].to(self.device), x["attention_mask"].to(self.device))
+            logits = logits.detach().cpu()
 
         probs = logits.softmax(dim=1)
         print(probs)
